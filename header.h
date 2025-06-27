@@ -271,15 +271,42 @@ struct model_registry {
 };
 
 
+// typedef struct{
+//     OrtSession* session;
+//     OrtEnv* env;
+//     OrtSessionOptions* session_options;
+//     bool is_loaded;
+//     bool is_running;
+// }MLDevice;
+/*
 typedef struct{
     OrtSession* session;
     OrtEnv* env;
     OrtSessionOptions* session_options;
+    OrtMemoryInfo* memory_info;
+    OrtAllocator* allocator;
+    const OrtApi* api;
+    char* input_name;
+    char* output_name;
     bool is_loaded;
     bool is_running;
-}MLDevice;
+}MLDevice;*/
 
-/* Main API Functions */
+
+/*
+typedef struct{
+    MLDevice* dev;
+    float* input;
+    int rows;
+    int cols;
+    float* output;
+    int out_size;
+    double* elasped_time;
+    uint64_t* cpu_cycles;
+    int row_id;
+    FILE* output_file;
+}ThreadArgs;
+ Main API Functions */
 
 
 
@@ -350,10 +377,7 @@ const char* ml_model_type_to_string(ml_model_type_t type);
 void ml_get_stats(ml_framework_t* framework, char* buffer, size_t size);
 void ml_get_model_stats(ml_model_t* model, char* buffer, size_t size);
 
-int ml_dev_load(MLDevice *dev, const char *model_path);
-int ml_dev_start(MLDevice *dev);
-int ml_dev_infer(MLDevice *dev, float *input_data, int input_count, size_t feature_cnt, float *output_data, size_t output_cnt, double* elapsed_time, uint64_t* cpu_cycles);
-int ml_dev_stop(MLDevice *dev);
-int ml_dev_unload(MLDevice *dev);
+#endif 
+/* ML_ONNX_FRAMEWORK_V2_H */
 
-#endif /* ML_ONNX_FRAMEWORK_V2_H */
+
