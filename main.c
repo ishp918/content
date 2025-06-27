@@ -1,265 +1,383 @@
-#define _POSIX_C_SOURCE 199309L
-#include <time.h>
+#ifndef ML_ONNX_NATIVE_ASYNC_H
+#define ML_ONNX_NATIVE_ASYNC_H
+
 #include <stdint.h>
-#include <inttypes.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include "ml_onnx_async.h"
-
-#define MAX_ROWS 50
-#define FEATURES 25
-#define CLASSES 2
-
-int read_csv(const char *filename, float data[MAX_ROWS][FEATURES], size_t *row_count)
-{
-    FILE *file = fopen(filename, "r");
-    if (!file)
-    {
-        perror("fopen");
-        return -1;
-    }
-    char line[4096];
-    *row_count = 0;
-    while (fgets(line, sizeof(line), file))
-    {
-        // char *token = strtok(line,",");
-        line[strcspn(line, "\r\n")] = '\0';
-        int col = 0;
-        char *token = strtok(line, ",");
-        while (token && col < FEATURES)
-        {
-            data[*row_count][col] = strtof(token, NULL);
-            token = strtok(NULL, ",");
-            col++;
-        }
-        if (col == FEATURES)
-        {
-            (*row_count)++;
-        }
-        if (*row_count >= MAX_ROWS)
-        {
-            break;
-        }
-    }
-        fclose(file);
-        return 0;
-}
-int main(int argc, char *argv[])
-{
-    const char *model_path = (argc > 1) ? argv[1] : "rf_10_pkts_model_sklearn.onnx";
-    const char *csv_path = (argc > 2) ? argv[2] : "data.csv";
-    const char* output_path = "output.txt";
-    MLDevice dev;
-    if (ml_dev_load(&dev, model_path) != 0)
-    {
-        fprintf(stderr, "Error loading model\n");
-        return 1;
-    }
-    ml_dev_start(&dev);
-    float inputs[MAX_ROWS][FEATURES];
-    size_t row_count;
-    if(read_csv(csv_path,inputs,&row_count)!=0){
-        fprintf(stderr,"Error reading CSV file\n");
-        return 1;
-    }
-    double elapsed_time = 0;
-    uint64_t cpu_cycle = 0;
-    printf("%zu",row_count);
-    FILE *output_file = fopen("output.txt","w");
-    if(!output_file){
-        fprintf(stderr,"Error opening output file\n");
-        return -1;
-    }
-
-    // double model_input[3][25] = {{167837989.000000,
-    //                               3112025659.000000, 40694.000000, 443.000000, 1.000000,
-    //                               0.000000, 18.000000, 1192.198238, 0.000000, 0.000000, 169.400000,
-    //                               968.400000, 5.000000, 5.000000, 0.022276, 0.000000, 1.000000, 1.000000,
-    //                               0.000000, 1.000000, 0.000000, 1.000000, 0.000000, 1.000000, 0.000000},
-    //                              {167837989.000000, 1609281240.000000, 51413.000000, 16208.000000,
-    //                               0.000000, 0.000000, 0.000000, 1403073.106734, 0.800000, 1.000000, 155.000000,
-    //                               129.000000, 5.000000, 5.000000, 0.065938, 0.000000, 1.000000, 0.000000, 1.000000,
-    //                               1.000000, 0.000000, 0.000000, 1.000000, 1.000000, 0.000000},
-    //                              {167837989.000000, 3112025659.000000, 40698.000000, 443.000000, 1.000000, 0.000000, 0.000000, 1713.923596, 0.000000, 0.000000, 194.600000, 978.600000, 5.000000, 5.000000, 0.013926, 0.000000,
-    //                               1.000000, 1.000000, 0.000000, 1.000000, 0.000000,
-    //                               1.000000, 0.000000, 0.000000, 1.000000},
-    //                              {167837989.000000, 1423995296.000000, 51413.000000, 16973.000000, 0.000000, 0.000000, 0.000000,
-    //                               996123.762980, 0.400000, 1.000000, 159.400000, 178.200000, 5.000000, 5.000000, 0.064660, 0.000000,
-    //                               1.000000, 0.000000, 1.000000, 1.000000, 0.000000, 0.000000, 1.000000, 1.000000, 0.000000}};
-
-    // float model_input_float[4][25];
-    // for (int k = 0; k < 4; k++)
-    // {
-    //     for (size_t i = 0; i < 25; i++)
-    //     {
-    //         model_input_float[k][i] = (float)model_input[k][i];
-    //     }
-    // }
-
-    // size_t model_input_len = 25 * sizeof(float);
-    // printf("%f",inputs[4]);
-    printf("Running inference on %zu rows\n", row_count);
-    for (size_t i = 0; i < row_count; i++)
-    {
-        float output[CLASSES] = {0};
-        ml_dev_infer(&dev, inputs[i], 1, FEATURES, output, CLASSES,&elapsed_time,&cpu_cycle);
-        printf("Row %zu: ", i + 1);
-        int max_idx = 0;
-        for (int j = 0; j < CLASSES; j++)
-        {
-            printf("Class %d: %.3f\n ", j, output[j]);
-            if (output[j] > output[max_idx])
-                max_idx = j;
-        }
-        printf("Row %zu: Predicted Class: %d\n",i+1,max_idx);
-        fprintf(output_file,"Row %zu: Predicted Class: %d | Time: %.3f ms | Cycles: %" PRIu64 "\n",i+1,max_idx,elapsed_time,cpu_cycle);
-    }
-    ml_dev_stop(&dev);
-    ml_dev_unload(&dev);
-    return 0;
-}
+#include <stdbool.h>
+#include <pthread.h>
+#include "onnxruntime_c_api.h"
+// #include <rte_common.h>
+// #include <rte_ring_core.h>
+// #include <rte_ring_elem.h>
 
 
+/* Configuration Constants */
+#define MAX_MODELS 32
+#define MAX_PP_CORES 32
+#define DEFAULT_TIMEOUT_MS 100
+#define RING_SIZE 2048
+#define MAX_TENSOR_DIMS 8
+#define MAX_MODEL_NAME_LEN 256
 
-/*#define _POSIX_C_SOURCE 199309L
-#include <time.h>
-#include <stdint.h>
-#include <inttypes.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "ml_onnx_async.h"
-#include "MLdev.h"
-#define MAX_ROWS 1500
-#define FEATURES 25
-#define CLASSES 2
+/* Forward declarations */
+typedef struct ml_framework ml_framework_t;
+typedef struct ml_model ml_model_t;
+typedef struct ml_async_request ml_async_request_t;
+typedef struct model_registry model_registry_t;
+
+/* Callback function types */
+typedef void (*inference_callback_fn)(void* user_data, float* output, size_t output_size, int status);
+typedef void (*batch_callback_fn)(void* user_data, float** outputs, size_t* output_sizes, size_t batch_size, int status);
+
+/* Request status codes */
+typedef enum {
+    ML_STATUS_SUCCESS = 0,
+    ML_STATUS_PENDING,
+    ML_STATUS_TIMEOUT,
+    ML_STATUS_ERROR,
+    ML_STATUS_CANCELLED
+} ml_status_t;
+
+/* Model types supported */
+typedef enum {
+    MODEL_TYPE_RANDOM_FOREST,
+    MODEL_TYPE_KNN,
+    MODEL_TYPE_NEURAL_NETWORK,
+    MODEL_TYPE_SVM,
+    MODEL_TYPE_XGBOOST,
+    MODEL_TYPE_CUSTOM
+} ml_model_type_t;
+
+/* Preprocessing types */
+typedef enum {
+    PREPROCESS_NONE,
+    PREPROCESS_STANDARDIZE,
+    PREPROCESS_MINMAX,
+    PREPROCESS_CUSTOM
+} preprocess_type_t;
+
+/* Tensor information */
+typedef struct {
+    char name[MAX_MODEL_NAME_LEN];
+    ONNXTensorElementDataType dtype;
+    int64_t shape[MAX_TENSOR_DIMS];
+    size_t num_dimensions;
+    size_t total_elements;
+    bool is_dynamic;
+} tensor_info_t;
+
+/* Preprocessing configuration */
+typedef struct {
+    preprocess_type_t type;
+    float* input_mean;
+    float* input_std;
+    float* input_min;
+    float* input_max;
+    void (*custom_preprocess)(void* input, void* output, size_t size);
+} preprocessing_config_t;
+
+/* Postprocessing configuration */
+typedef struct {
+    char** class_labels;
+    int num_classes;
+    float confidence_threshold;
+    float output_scale;
+    float output_offset;
+    void (*custom_postprocess)(void* output, void* processed, size_t size);
+} postprocessing_config_t;
+
+/* Performance hints */
+typedef struct {
+    bool prefer_gpu;
+    int num_threads;
+    bool enable_profiling;
+    size_t max_memory_mb;
+} performance_hints_t;
+
+/* Model metadata based on type */
+typedef union {
+    struct {
+        int num_trees;
+        int max_depth;
+        int num_features;
+    } rf_metadata;
+    
+    struct {
+        int k_value;
+        char distance_metric[64];
+    } knn_metadata;
+    
+    struct {
+        int num_layers;
+        char activation[64];
+        bool supports_dynamic_batch;
+    } nn_metadata;
+} model_metadata_t;
+
+/* Request priority levels */
+typedef enum {
+    ML_PRIORITY_LOW = 0,
+    ML_PRIORITY_NORMAL,
+    ML_PRIORITY_HIGH
+} ml_priority_t;
+
+/* Memory pool configuration */
+typedef struct {
+    size_t input_buffer_size;
+    size_t output_buffer_size;
+    size_t num_input_buffers;
+    size_t num_output_buffers;
+    bool use_hugepages;
+} ml_memory_config_t;
+
+/* Framework configuration */
+typedef struct {
+    size_t num_pp_cores;          /* Number of packet processing cores */
+    ml_memory_config_t memory;    /* Memory configuration */
+    uint32_t default_timeout_ms;  /* Default inference timeout */
+    bool enable_profiling;        /* Enable performance profiling */
+    size_t max_concurrent_requests; /* Max async requests in flight */
+} ml_framework_config_t;
+
+typedef struct {
+    /* Basic info */
+    const char* model_path;
+    const char* model_name;
+    ml_model_type_t model_type;
+    const char* description;
+    
+    /* Tensor specifications */
+    tensor_info_t* input_tensors;
+    size_t num_inputs;
+    tensor_info_t* output_tensors;
+    size_t num_outputs;
+    
+    /* Processing configs */
+    preprocessing_config_t* preprocess_config;
+    postprocessing_config_t* postprocess_config;
+    
+    /* Performance hints */
+    performance_hints_t* perf_hints;
+    size_t max_batch_size;
+    
+    /* Model-specific metadata */
+    model_metadata_t* metadata;
+} ml_model_config_t;
+
+/* Enhanced model structure */
+struct ml_model {
+    /* Basic information */
+    char name[MAX_MODEL_NAME_LEN];
+    char path[MAX_MODEL_NAME_LEN];
+    char description[MAX_MODEL_NAME_LEN];
+    ml_model_type_t type;
+    char version[32];
+    
+    /* ONNX Runtime objects */
+    OrtSession* session;
+    OrtSessionOptions* session_options;
+    
+    /* Input/Output specifications */
+    tensor_info_t* inputs;
+    size_t num_inputs;
+    tensor_info_t* outputs;
+    size_t num_outputs;
+    
+    /* Model-specific metadata */
+    model_metadata_t metadata;
+    
+    /* Processing configurations */
+    preprocessing_config_t preprocess;
+    postprocessing_config_t postprocess;
+    
+    /* Performance configuration */
+    performance_hints_t perf_hints;
+    size_t max_batch_size;
+    
+    /* Runtime statistics */
+    struct {
+        uint64_t total_inferences;
+        uint64_t total_batches;
+        double avg_latency_ms;
+        uint64_t last_used_timestamp;
+    } stats;
+    
+    /* Model state */
+    bool is_loaded;
+    bool supports_batching;
+    pthread_mutex_t lock;
+    
+    /* Model-specific functions */
+    int (*validate_input)(struct ml_model* model, const void* input, size_t size);
+    int (*prepare_batch)(struct ml_model* model, const void** inputs, size_t count, void** batch_output);
+};
+
+
+/* Async request structure */
+typedef struct  ml_async_request {
+    uint64_t request_id;
+    uint32_t pp_core_id;
+    ml_model_t* model;
+    void* input_buffer;
+    void* output_buffer;
+    size_t input_size;
+    size_t output_size;
+    inference_callback_fn callback;
+    void* user_data;
+    ml_status_t status;
+    uint64_t timestamp;
+    /* ONNX specific */
+    OrtValue* input_tensor;
+    OrtValue* output_tensor;
+    OrtRunOptions* run_options;
+} ml_async_request;
+
+/* Ring buffer for lock-free communication */
+typedef struct {
+    void** buffer;
+    size_t size;
+    size_t mask;
+    volatile uint64_t head;
+    volatile uint64_t tail;
+    char pad0[64];  /* Cache line padding */
+} ml_ring_buffer_t;
+
+typedef struct{
+    ml_async_request* buffer;
+    size_t head;
+    size_t tail;
+    size_t size;
+    size_t capacity;
+} ring_buffer;
+
+/* Per-core communication channel */
+typedef struct {
+    uint32_t pp_core_id;
+    ml_ring_buffer_t* response_ring;  /* ML -> PP responses */
+} ml_core_channel_t;
 
 
 
+/* Model registry structure */
+struct model_registry {
+    ml_model_t** models;
+    size_t capacity;
+    size_t count;
+    // pthread_rwlock_t lock;
+    /* Fast lookup structures */
+    void* name_to_model_map;  /* TODO: Implement as hash table */
+    ml_model_t** type_indices[MODEL_TYPE_CUSTOM + 1];  /* Arrays per type */
+    size_t type_counts[MODEL_TYPE_CUSTOM + 1];
+};
 
-int read_csv(const char *filename, float data[MAX_ROWS][FEATURES], size_t *row_count)
-{
-    FILE *file = fopen(filename, "r");
-    if (!file)
-    {
-        perror("fopen");
-        return -1;
-    }
-    char line[4096];
-    *row_count = 0;
-    while (fgets(line, sizeof(line), file))
-    {
-        line[strcspn(line, "\r\n")] = '\0';
-        int col = 0;
-        char *token = strtok(line, ",");
-        while (token && col < FEATURES)
-        {
-            data[*row_count][col] = strtof(token, NULL);
-            token = strtok(NULL, ",");
-            col++;
-        }
-        if (col == FEATURES)
-        {
-            (*row_count)++;
-        }
-        if (*row_count >= MAX_ROWS)
-        {
-            break;
-        }
-    }
-        fclose(file);
-        return 0;
-}
-int main(int argc, char *argv[])
-{
-    const char *model_path = (argc > 1) ? argv[1] : "rf_10_pkts_model_sklearn.onnx";
-    const char *csv_path = (argc > 2) ? argv[2] : "data.csv";
-    const char* output_path = "output.txt";
-    MLDevice dev;
-    if (ml_dev_load(&dev, model_path) != 0)
-    {
-        fprintf(stderr, "Error loading model\n");
-        return 1;
-    }
-    ml_dev_start(&dev);
-    float inputs[MAX_ROWS][FEATURES];
-    size_t row_count;
-    if(read_csv(csv_path,&inputs,&row_count)!=0){
-        fprintf(stderr,"Error reading CSV file\n");
-        return 1;
-    }
-    double elapsed_time = 0;
-    uint64_t cpu_cycle = 0;
-    printf("%d",row_count);
-    FILE *output_file = fopen("output.txt","w");
-    if(!output_file){
-        fprintf(stderr,"Error opening output file\n");
-        return -1;
-    }
 
-    // double model_input[3][25] = {{167837989.000000,
-    //                               3112025659.000000, 40694.000000, 443.000000, 1.000000,
-    //                               0.000000, 18.000000, 1192.198238, 0.000000, 0.000000, 169.400000,
-    //                               968.400000, 5.000000, 5.000000, 0.022276, 0.000000, 1.000000, 1.000000,
-    //                               0.000000, 1.000000, 0.000000, 1.000000, 0.000000, 1.000000, 0.000000},
-    //                              {167837989.000000, 1609281240.000000, 51413.000000, 16208.000000,
-    //                               0.000000, 0.000000, 0.000000, 1403073.106734, 0.800000, 1.000000, 155.000000,
-    //                               129.000000, 5.000000, 5.000000, 0.065938, 0.000000, 1.000000, 0.000000, 1.000000,
-    //                               1.000000, 0.000000, 0.000000, 1.000000, 1.000000, 0.000000},
-    //                              {167837989.000000, 3112025659.000000, 40698.000000, 443.000000, 1.000000, 0.000000, 0.000000, 1713.923596, 0.000000, 0.000000, 194.600000, 978.600000, 5.000000, 5.000000, 0.013926, 0.000000,
-    //                               1.000000, 1.000000, 0.000000, 1.000000, 0.000000,
-    //                               1.000000, 0.000000, 0.000000, 1.000000},
-    //                              {167837989.000000, 1423995296.000000, 51413.000000, 16973.000000, 0.000000, 0.000000, 0.000000,
-    //                               996123.762980, 0.400000, 1.000000, 159.400000, 178.200000, 5.000000, 5.000000, 0.064660, 0.000000,
-    //                               1.000000, 0.000000, 1.000000, 1.000000, 0.000000, 0.000000, 1.000000, 1.000000, 0.000000}};
+// typedef struct{
+//     OrtSession* session;
+//     OrtEnv* env;
+//     OrtSessionOptions* session_options;
+//     bool is_loaded;
+//     bool is_running;
+// }MLDevice;
+/*
+typedef struct{
+    OrtSession* session;
+    OrtEnv* env;
+    OrtSessionOptions* session_options;
+    OrtMemoryInfo* memory_info;
+    OrtAllocator* allocator;
+    const OrtApi* api;
+    char* input_name;
+    char* output_name;
+    bool is_loaded;
+    bool is_running;
+}MLDevice;*/
 
-    // float model_input_float[4][25];
-    // for (int k = 0; k < 4; k++)
-    // {
-    //     for (size_t i = 0; i < 25; i++)
-    //     {
-    //         model_input_float[k][i] = (float)model_input[k][i];
-    //     }
-    // }
 
-    // size_t model_input_len = 25 * sizeof(float);
-    // printf("%f",inputs[4]);
+/*
+typedef struct{
+    MLDevice* dev;
+    float* input;
+    int rows;
+    int cols;
+    float* output;
+    int out_size;
+    double* elasped_time;
+    uint64_t* cpu_cycles;
+    int row_id;
+    FILE* output_file;
+}ThreadArgs;
+ Main API Functions */
 
 
 
+/* Framework lifecycle */
+ml_framework_t* ml_framework_init(const ml_framework_config_t* config);
+void ml_framework_destroy(ml_framework_t* framework);
+
+/* Model management */
+ml_model_t* ml_load_model(ml_framework_t* framework, const ml_model_config_t* config);
+void ml_unload_model(ml_framework_t* framework, ml_model_t* model);
+ml_model_t* ml_get_model(ml_framework_t* framework, const char* model_name);
+
+/* Model registry functions */
+model_registry_t* ml_create_registry(size_t initial_capacity);
+void ml_destroy_registry(model_registry_t* registry);
+int ml_registry_add_model(model_registry_t* registry, ml_model_t* model);
+ml_model_t* ml_registry_get_model(model_registry_t* registry, const char* name);
+ml_model_t** ml_registry_get_models_by_type(model_registry_t* registry, ml_model_type_t type, size_t* count);
+
+/* Async inference using native ONNX RunAsync */
+uint64_t ml_inference_async(
+    ml_framework_t* framework,
+    ml_model_t* model,
+    const void* input,
+    size_t input_size,
+    inference_callback_fn callback,
+    void* user_data,
+    ml_priority_t priority,
+    uint32_t timeout_ms
+);
+
+/* Batch inference */
+uint64_t ml_inference_batch_async(
+    ml_framework_t* framework,
+    ml_model_t* model,
+    const void** inputs,
+    size_t* input_sizes,
+    size_t batch_size,
+    batch_callback_fn callback,
+    void* user_data
+);
 
 
 
+/* Request management */
+int ml_cancel_request(ml_framework_t* framework, uint64_t request_id);
+ml_status_t ml_get_request_status(ml_framework_t* framework, uint64_t request_id);
 
-    double total_time = 0;
-    uint64_t total_cycles = 0;
-    printf("Running inference on %zu rows\n", row_count);
-    for (size_t i = 0; i < row_count+1; i++)
-    {
-        float output[CLASSES] = {0};
-        ml_dev_infer(&dev, inputs[i], 1, FEATURES, output, CLASSES,&elapsed_time,&cpu_cycle);
-        total_time += elapsed_time;
-        total_cycles+=cpu_cycle;
-        printf("Row %zu: ", i + 1);
-        int max_idx = 0;
-        for (int j = 0; j < CLASSES; j++)
-        {
-            printf("Class %d: %.3f\n ", j, output[j]);
-            if (output[j] > output[max_idx])
-                max_idx = j;
-        }
-        printf("Row %zu: Predicted Class: %d\n",i+1,max_idx);
-        fprintf(output_file,"Row %zu: Predicted Class: %d | Time: %.3f ms | Cycles: %" PRIu64 "\n",i+1,max_idx,elapsed_time,cpu_cycle);
-    }
-    double avg_time = total_time/(row_count+1);
-    double avg_cycles = (double)total_cycles/(row_count+1);
-    fprintf(output_file,"\n========Summary======\n");
-    fprintf(output_file,"Total Rows : %zu\n",row_count);
-    fprintf(output_file,"Average Time per Inference: %.3f ms\n",avg_time);
-    fprintf(output_file,"Average CPU Cycles per Inference: %.3f \n",avg_cycles);
-    ml_dev_stop(&dev);
-    ml_dev_unload(&dev);
-    return 0;
-}
-*/
+/* Memory management */
+void* ml_alloc_input_buffer(ml_framework_t* framework, size_t size);
+void* ml_alloc_output_buffer(ml_framework_t* framework, size_t size);
+void ml_free_input_buffer(ml_framework_t* framework, void* buffer);
+void ml_free_output_buffer(ml_framework_t* framework, void* buffer);
+
+/* PP Core registration */
+int ml_register_pp_core(ml_framework_t* framework, uint32_t pp_core_id);
+ml_async_request_t* ml_poll_response(ml_framework_t* framework, uint32_t pp_core_id);
+
+/* Preprocessing/Postprocessing */
+int ml_preprocess_input(ml_model_t* model, const void* raw_input, void* processed_input, size_t size);
+int ml_postprocess_output(ml_model_t* model, const void* raw_output, void* processed_output, size_t size);
+
+/* Model introspection */
+void ml_print_model_info(ml_model_t* model);
+const char* ml_model_type_to_string(ml_model_type_t type);
+
+/* Profiling */
+void ml_get_stats(ml_framework_t* framework, char* buffer, size_t size);
+void ml_get_model_stats(ml_model_t* model, char* buffer, size_t size);
+
+#endif 
+/* ML_ONNX_FRAMEWORK_V2_H */
+
+
